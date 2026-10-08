@@ -1,0 +1,46 @@
+server:
+  port: 80
+  shutdown: graceful
+
+spring:
+  application:
+    name: az-be-app
+
+  mvc:
+    problemdetails:
+      enabled: true
+
+  jpa:
+    open-in-view: false
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST}:${DB_PORT:5432}/${DB_NAME}
+    # username: ${config.spring-datasource-username}
+    # password: ${config.spring-datasource-password}
+
+  config:
+    import: azureAppConfiguration
+
+  cloud:
+    azure:
+      appconfiguration:
+        stores:
+          - endpoint: ${AZURE_APPCONFIG_ENDPOINT}
+            selects:
+              - key-filter: /application/
+                label-filter: ',${spring.profiles.active:}'
+            monitoring:
+              enabled: true
+              refresh-interval: 60s
+              triggers:
+                - key: /application/sentinel
+      message-converter:
+        isolated-object-mapper: false
+      servicebus:
+        enabled: true
+
+management:
+  tracing:
+    sampling:
+      probability: 1
+    
