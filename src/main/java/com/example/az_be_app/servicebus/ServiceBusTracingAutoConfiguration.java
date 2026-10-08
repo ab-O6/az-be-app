@@ -1,7 +1,10 @@
 package com.example.az_be_app.servicebus;
 
+import java.util.Map;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.context.annotation.Bean;
@@ -179,16 +182,27 @@ public class ServiceBusTracingAutoConfiguration {
         private ServiceBusErrorHandler wrapErrorHandler(ServiceBusErrorHandler delegate,
                 TraceContextHolder holder) {
             return (errorContext) -> {
-                Context remoteContext = holder.get();
-                if (remoteContext != null) {
-                    ObservationRegistry registry = registryProvider.getObject();
-                    try (Scope scope = remoteContext.makeCurrent()) {
-                        Observation.createNotStarted("servicebus.process.error", registry)
-                                .lowCardinalityKeyValue("messaging.system", "servicebus")
-                                .lowCardinalityKeyValue("messaging.destination.entity",
-                                        errorContext.getEntityPath())
-                                .observe(() -> delegate.accept(errorContext));
+                TraceSnapshot snapshot = holder.get();
+                if (snapshot != null) {
+                    Map<String, String> previousMdc = MDC.getCopyOfContextMap();
+                    try {
+                        if (snapshot.mdcContext() != null) {
+                            MDC.setContextMap(snapshot.mdcContext());
+                        }
+                        if (snapshot.context() != null) {
+                            try (@SuppressWarnings("unused")
+                            Scope scope = snapshot.context().makeCurrent()) {
+                                delegate.accept(errorContext);
+                            }
+                        } else {
+                            delegate.accept(errorContext);
+                        }
                     } finally {
+                        if (previousMdc != null) {
+                            MDC.setContextMap(previousMdc);
+                        } else {
+                            MDC.clear();
+                        }
                         holder.remove();
                     }
                 } else {
@@ -232,7 +246,7 @@ public class ServiceBusTracingAutoConfiguration {
             String traceparent = extractTraceparent(sbMessage);
 
             Context remoteContext = parseTraceparent(traceparent);
-            holder.set(remoteContext);
+            holder.set(remoteContext, null);
 
             ObservationRegistry registry = registryProvider.getObject();
 
@@ -244,7 +258,7 @@ public class ServiceBusTracingAutoConfiguration {
                         .lowCardinalityKeyValue("messaging.system", "servicebus")
                         .lowCardinalityKeyValue("messaging.destination", destination)
                         .observe(() -> {
-                            holder.set(Context.current());
+                            holder.set(Context.current(), MDC.getCopyOfContextMap());
                             ((MessageListener) delegate).onMessage(msgCtx);
                         });
             }
@@ -255,23 +269,25 @@ public class ServiceBusTracingAutoConfiguration {
     }
 
     // -----------------------------------------------------------------------
-    // Trace context holder — ThreadLocal bridge between listener and error handler
+    // Trace context snapshot & ThreadLocal holder between listener and error handler
     // -----------------------------------------------------------------------
 
+    private record TraceSnapshot(Context context, Map<String, String> mdcContext) {}
+
     /**
-     * Per-container {@link ThreadLocal} holder that bridges trace context from
-     * message processing to error handling on the same {@code receiverPump} thread.
+     * Per-container {@link ThreadLocal} holder that bridges trace context and MDC
+     * snapshot from message processing to error handling on the same {@code receiverPump} thread.
      * Each container gets its own instance, so concurrent containers cannot
      * interfere with each other.
      */
     private static class TraceContextHolder {
-        private final ThreadLocal<Context> contextHolder = new ThreadLocal<>();
+        private final ThreadLocal<TraceSnapshot> contextHolder = new ThreadLocal<>();
 
-        void set(Context context) {
-            contextHolder.set(context);
+        void set(Context context, Map<String, String> mdcContext) {
+            contextHolder.set(new TraceSnapshot(context, mdcContext));
         }
 
-        Context get() {
+        TraceSnapshot get() {
             return contextHolder.get();
         }
 
